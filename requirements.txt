@@ -1,0 +1,13 @@
+# Local / shared (no CUDA required for smoke)
+numpy>=1.24
+pandas>=2.0
+pyarrow>=14.0
+Pillow>=10.0
+pyyaml>=6.0
+tqdm>=4.66
+opencv-python-headless>=4.8
+huggingface_hub>=0.23
+datasets>=2.19
+matplotlib>=3.8
+scipy>=1.11
+pytest>=7.4

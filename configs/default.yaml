@@ -1,0 +1,47 @@
+seed: 42
+
+model:
+  name: Qwen/Qwen3-VL-4B-Instruct
+  max_tokens: 16
+  temperature: 0.0
+
+serving:
+  # Local Mac default: mock. On CUDA hosts set to vllm.
+  backend: mock  # mock | vllm
+  gpu_memory_utilization: 0.9
+  max_model_len: 32768
+  # Qwen3-VL + vLLM: avoid HF re-resize crushing spatial tokens
+  do_resize: false
+
+dataset:
+  name: Video-MME
+  hf_repo: lmms-lab/Video-MME
+  root: data/videomme
+  subtitle: false
+  # start small; expand only after pipeline works
+  default_limit: 20
+
+video:
+  baseline_num_frames: 32
+  max_pixels: 360360  # ~360*420*2.4-ish; keep fixed across pruning rates
+  fps: null  # if set, overrides num_frames sampling
+
+pruning:
+  rates: [0.0, 0.25, 0.5, 0.75]
+  # retained_frames = ceil(baseline_num_frames * (1 - rate))
+
+complexity:
+  num_frames: 8
+  alpha_motion: 0.7
+  beta_scene: 0.3
+  scene_threshold: 0.35
+  # thresholds chosen on a held-out calibration split, then frozen
+  t1: 0.15   # complexity < t1 → prune 0.75
+  t2: 0.40   # complexity < t2 → prune 0.50 else 0.25
+  calibration_fraction: 0.3
+
+paths:
+  results_dir: results
+  predictions_dir: results/predictions
+  metrics_dir: results/metrics
+  figures_dir: results/figures

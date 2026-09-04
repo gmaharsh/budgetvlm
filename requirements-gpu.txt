@@ -1,0 +1,7 @@
+# CUDA machine only (RunPod / AWS GPU / local NVIDIA)
+-r requirements.txt
+torch>=2.4
+vllm>=0.11.0
+transformers>=4.57.0
+qwen-vl-utils>=0.0.14
+accelerate>=0.33

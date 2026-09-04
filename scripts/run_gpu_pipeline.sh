@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Run on a CUDA machine (RunPod / AWS GPU / local NVIDIA).
+# Optionally sync results to S3 when BUDGETVLM_S3_URI is set.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -7,6 +8,9 @@ python -m venv .venv || true
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements-gpu.txt
+
+RUN_ID="${BUDGETVLM_RUN_ID:-runpod_$(date -u +%Y%m%dT%H%M%SZ)}"
+echo "=== run_id=${RUN_ID} ==="
 
 echo "=== GPU check ==="
 python - <<'PY'
@@ -32,6 +36,14 @@ python -m src.run_budgetvlm \
   --predictions results/predictions/fixed20_vllm.jsonl \
   --complexity results/metrics/complexity.jsonl \
   --tolerance results/metrics/tolerance.jsonl
-python -m src.make_plots --prefix "" 2>/dev/null || true
+python -m src.make_plots --prefix smoke 2>/dev/null || true
+
+if [[ -n "${BUDGETVLM_S3_URI:-}" ]]; then
+  echo "=== Upload results to ${BUDGETVLM_S3_URI}/${RUN_ID} ==="
+  python -m src.s3_sync upload --run-id "${RUN_ID}"
+else
+  echo "=== Skipping S3 upload (set BUDGETVLM_S3_URI to enable) ==="
+fi
 
 echo "Done. Inspect results/metrics/comparison.csv"
+echo "run_id=${RUN_ID}"

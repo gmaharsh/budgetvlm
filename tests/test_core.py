@@ -7,6 +7,7 @@ from src.complexity import frame_difference_complexity, scene_change_score
 from src.policy import adaptive_pruning_rate, max_safe_pruning_rate
 from src.prompts import extract_letter, is_correct
 from src.pruning import retained_frames
+from src.s3_sync import parse_s3_uri, resolve_s3_uri
 
 
 def test_retained_frames():
@@ -49,3 +50,16 @@ def test_frame_diff_static_vs_motion():
         motion.append(f)
     assert frame_difference_complexity(static) < frame_difference_complexity(motion)
     assert scene_change_score(motion, threshold=0.1) >= scene_change_score(static, threshold=0.1)
+
+
+def test_parse_s3_uri():
+    assert parse_s3_uri("s3://my-bucket/budgetvlm") == ("my-bucket", "budgetvlm")
+    assert parse_s3_uri("s3://my-bucket/") == ("my-bucket", "")
+
+
+def test_resolve_s3_uri(monkeypatch):
+    monkeypatch.delenv("BUDGETVLM_S3_URI", raising=False)
+    monkeypatch.delenv("BUDGETVLM_S3_BUCKET", raising=False)
+    assert resolve_s3_uri({"s3": {"bucket": "b", "prefix": "budgetvlm"}}) == "s3://b/budgetvlm"
+    monkeypatch.setenv("BUDGETVLM_S3_URI", "s3://env-bucket/runs")
+    assert resolve_s3_uri({"s3": {"bucket": "ignored"}}) == "s3://env-bucket/runs"

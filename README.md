@@ -39,6 +39,21 @@ pip install -r requirements-gpu.txt
 bash scripts/run_gpu_pipeline.sh
 ```
 
+### Save results to S3 (recommended on RunPod)
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=us-east-1
+export BUDGETVLM_S3_URI=s3://YOUR_BUCKET/budgetvlm
+bash scripts/run_gpu_pipeline.sh   # uploads results/ at the end
+
+# later, on your laptop:
+python -m src.s3_sync download --run-id runpod_YYYYMMDDThhmmssZ --dest ./from_s3
+```
+
+Details: [`docs/runpod_s3.md`](docs/runpod_s3.md).
+
 Or step by step:
 
 ```bash

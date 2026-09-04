@@ -45,3 +45,16 @@ paths:
   predictions_dir: results/predictions
   metrics_dir: results/metrics
   figures_dir: results/figures
+
+# Optional durable storage for RunPod / cloud runs.
+# Prefer env vars on the pod:
+#   BUDGETVLM_S3_URI=s3://your-bucket/budgetvlm
+#   AWS_ACCESS_KEY_ID=...
+#   AWS_SECRET_ACCESS_KEY=...
+#   AWS_DEFAULT_REGION=us-east-1
+s3:
+  enabled: false
+  uri: null          # e.g. s3://my-bucket/budgetvlm
+  bucket: null       # alternative to uri
+  prefix: budgetvlm
+  region: us-east-1

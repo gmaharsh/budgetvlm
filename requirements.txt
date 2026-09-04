@@ -11,3 +11,4 @@ datasets>=2.19
 matplotlib>=3.8
 scipy>=1.11
 pytest>=7.4
+boto3>=1.34

@@ -42,32 +42,58 @@ def _sample_indices(n_total: int, n_keep: int) -> list[int]:
     return [int(round(i * (n_total - 1) / (n_keep - 1))) for i in range(n_keep)]
 
 
+def _maybe_resize(rgb: np.ndarray, resize_max: int | None) -> np.ndarray:
+    if resize_max is None:
+        return rgb
+    h, w = rgb.shape[:2]
+    scale = resize_max / max(h, w)
+    if scale >= 1.0:
+        return rgb
+    return cv2.resize(
+        rgb,
+        (max(1, int(w * scale)), max(1, int(h * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
 def load_frames(
     path: str | Path,
     num_frames: int,
     resize_max: int | None = None,
 ) -> tuple[list[np.ndarray], VideoMeta]:
-    """Return RGB uint8 frames (H, W, 3) sampled uniformly."""
+    """Return RGB uint8 frames (H, W, 3) sampled uniformly (OpenCV)."""
     meta = probe_video(path)
-    idxs = _sample_indices(meta.n_frames_total, num_frames)
     cap = cv2.VideoCapture(str(path))
     frames: list[np.ndarray] = []
-    for idx in idxs:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ok, bgr = cap.read()
-        if not ok:
-            continue
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        if resize_max is not None:
-            h, w = rgb.shape[:2]
-            scale = resize_max / max(h, w)
-            if scale < 1.0:
-                rgb = cv2.resize(
-                    rgb,
-                    (max(1, int(w * scale)), max(1, int(h * scale))),
-                    interpolation=cv2.INTER_AREA,
-                )
-        frames.append(rgb)
+
+    if meta.n_frames_total > 0:
+        idxs = _sample_indices(meta.n_frames_total, num_frames)
+        for idx in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, bgr = cap.read()
+            if not ok:
+                continue
+            frames.append(_maybe_resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), resize_max))
+    else:
+        # Some containers report 0 frame count; sequential decode then subsample.
+        raw: list[np.ndarray] = []
+        while True:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            raw.append(_maybe_resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), resize_max))
+        if raw:
+            idxs = _sample_indices(len(raw), num_frames)
+            frames = [raw[i] for i in idxs]
+            meta = VideoMeta(
+                path=meta.path,
+                duration_sec=len(raw) / meta.fps if meta.fps > 0 else 0.0,
+                fps=meta.fps,
+                n_frames_total=len(raw),
+                width=raw[0].shape[1],
+                height=raw[0].shape[0],
+            )
+
     cap.release()
     if not frames:
         raise RuntimeError(f"Failed to decode any frames from {path}")

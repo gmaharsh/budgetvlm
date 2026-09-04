@@ -13,6 +13,12 @@ echo "=== Wipe conflicting packages ==="
 pip uninstall -y torch torchvision torchaudio torchcodec vllm 2>/dev/null || true
 pip freeze | rg -i 'cu13' | cut -d= -f1 | xargs -r pip uninstall -y 2>/dev/null || true
 
+# Optional system FFmpeg (helps torchcodec if used elsewhere). Our vLLM path
+# decodes with OpenCV → PIL frames and does not require this.
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update -qq && apt-get install -y -qq ffmpeg libsm6 libxext6 >/dev/null || true
+fi
+
 echo "=== Base deps ==="
 pip install -r requirements-gpu.txt
 

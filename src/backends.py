@@ -211,16 +211,28 @@ class VLLMBackend(Backend):
                 f"got request rate={pruning_rate}. Use one engine per rate."
             )
         self._lazy_init()
+        from PIL import Image
         from qwen_vl_utils import process_vision_info
 
-        meta = probe_video(video_path)
+        # Decode with OpenCV ourselves. qwen-vl-utils prefers torchcodec, which
+        # needs system FFmpeg libs missing on many RunPod images, then falls back
+        # to torchvision.io.read_video (removed in recent torchvision).
+        # Passing a PIL frame list skips both backends.
+        frames, meta = load_frames(video_path, num_frames=baseline_num_frames)
+        if len(frames) < 2:
+            raise RuntimeError(f"Need >=2 frames from {video_path}, got {len(frames)}")
+        # qwen-vl-utils pads to multiples of 2; keep even count explicitly.
+        if len(frames) % 2 == 1:
+            frames = frames + [frames[-1]]
+        pil_frames = [Image.fromarray(f) for f in frames]
         prompt_text = build_mcq_prompt(question, options)
 
         # FIXED frame count — pruning is token-level inside vLLM
         video_cfg: dict[str, Any] = {
             "type": "video",
-            "video": video_path,
-            "nframes": baseline_num_frames,
+            "video": pil_frames,
+            "sample_fps": float(meta.fps) if meta.fps > 0 else 2.0,
+            "raw_fps": float(meta.fps) if meta.fps > 0 else 2.0,
         }
         if max_pixels is not None:
             video_cfg["max_pixels"] = max_pixels
@@ -231,6 +243,13 @@ class VLLMBackend(Backend):
                 "content": [video_cfg, {"type": "text", "text": prompt_text}],
             }
         ]
+        log.info(
+            "OpenCV decode: path=%s frames=%d size=%sx%s",
+            video_path,
+            len(pil_frames),
+            frames[0].shape[1],
+            frames[0].shape[0],
+        )
 
         text = self._processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -289,6 +308,7 @@ class VLLMBackend(Backend):
                 "pruning_kind": "vllm_video_token_prune",
                 "video_pruning_method": self.pruning_method if self.pruning_rate > 0 else "none",
                 "tokens_retained_are_estimate": True,
+                "video_decode": "opencv_pil_frames",
             },
         )
 

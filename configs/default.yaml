@@ -46,15 +46,26 @@ paths:
   metrics_dir: results/metrics
   figures_dir: results/figures
 
-# Optional durable storage for RunPod / cloud runs.
-# Prefer env vars on the pod:
-#   BUDGETVLM_S3_URI=s3://your-bucket/budgetvlm
+# Durable storage for RunPod / cloud runs.
+# Pipeline start calls `python -m src.s3_sync ensure` which:
+#   - resolves bucket (env / config / auto budgetvlm-<account_id>)
+#   - creates it if missing
+#   - updates block-public-access + SSE-S3 encryption
+# Pipeline end uploads results under <uri>/<run_id>/
+#
+# Env on the pod:
 #   AWS_ACCESS_KEY_ID=...
 #   AWS_SECRET_ACCESS_KEY=...
 #   AWS_DEFAULT_REGION=us-east-1
+#   BUDGETVLM_AWS_ACCOUNT_ID=704052814573   # optional pin
+#   BUDGETVLM_S3_BUCKET=budgetvlm-704052814573  # optional pin
 s3:
-  enabled: false
-  uri: null          # e.g. s3://my-bucket/budgetvlm
-  bucket: null       # alternative to uri
-  prefix: budgetvlm
+  enabled: true
+  auto_create: true
+  uri: null
+  bucket: null       # default: budgetvlm-<account_id>
+  prefix: results
   region: us-east-1
+  block_public_access: true
+  ensure_encryption: true
+  ensure_versioning: false

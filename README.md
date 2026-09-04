@@ -41,15 +41,26 @@ bash scripts/run_gpu_pipeline.sh
 
 ### Save results to S3 (recommended on RunPod)
 
+With AWS credentials set, the pipeline **creates/updates the bucket on start**
+and **uploads `results/` on finish**:
+
 ```bash
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 export AWS_DEFAULT_REGION=us-east-1
-export BUDGETVLM_S3_URI=s3://YOUR_BUCKET/budgetvlm
-bash scripts/run_gpu_pipeline.sh   # uploads results/ at the end
+export BUDGETVLM_AWS_ACCOUNT_ID=704052814573   # optional
 
-# later, on your laptop:
-python -m src.s3_sync download --run-id runpod_YYYYMMDDThhmmssZ --dest ./from_s3
+bash scripts/run_gpu_pipeline.sh
+# ensure → s3://budgetvlm-704052814573/results
+# upload → .../results/<run_id>/
+```
+
+Manual:
+
+```bash
+python -m src.s3_sync ensure
+python -m src.s3_sync upload --run-id runpod_fixed20
+python -m src.s3_sync download --run-id runpod_fixed20 --dest ./from_s3
 ```
 
 Details: [`docs/runpod_s3.md`](docs/runpod_s3.md).

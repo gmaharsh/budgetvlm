@@ -60,6 +60,14 @@ def test_parse_s3_uri():
 def test_resolve_s3_uri(monkeypatch):
     monkeypatch.delenv("BUDGETVLM_S3_URI", raising=False)
     monkeypatch.delenv("BUDGETVLM_S3_BUCKET", raising=False)
-    assert resolve_s3_uri({"s3": {"bucket": "b", "prefix": "budgetvlm"}}) == "s3://b/budgetvlm"
+    monkeypatch.delenv("BUDGETVLM_AWS_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("AWS_ACCOUNT_ID", raising=False)
+    assert resolve_s3_uri({"s3": {"bucket": "b", "prefix": "results"}}) == "s3://b/results"
     monkeypatch.setenv("BUDGETVLM_S3_URI", "s3://env-bucket/runs")
     assert resolve_s3_uri({"s3": {"bucket": "ignored"}}) == "s3://env-bucket/runs"
+
+
+def test_default_bucket_name():
+    from src.s3_sync import default_bucket_name
+
+    assert default_bucket_name("704052814573") == "budgetvlm-704052814573"

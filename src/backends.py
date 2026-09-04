@@ -193,6 +193,8 @@ class VLLMBackend(Backend):
             video_pruning_rate=vpr,
             # Freeze HF/vLLM video processor policy (do not rely on version defaults).
             mm_processor_kwargs={"cap_pixels_per_frame": self.cap_pixels_per_frame},
+            # Allow absolute video paths in chat templates (pruned path uses path placeholders).
+            allowed_local_media_path="/",
         )
         if vpr is not None:
             kwargs["video_pruning_method"] = self.pruning_method
@@ -276,67 +278,104 @@ class VLLMBackend(Backend):
             )
         self._lazy_init()
         from PIL import Image
-        from qwen_vl_utils import process_vision_info
 
-        # Decode with OpenCV ourselves. qwen-vl-utils prefers torchcodec, which
-        # needs system FFmpeg libs missing on many RunPod images, then falls back
-        # to torchvision.io.read_video (removed in recent torchvision).
-        # Passing a PIL frame list skips both backends.
+        # Decode with OpenCV (torchcodec/torchvision are broken on many pods).
         frames, meta = load_frames(video_path, num_frames=baseline_num_frames)
         if len(frames) < 2:
             raise RuntimeError(f"Need >=2 frames from {video_path}, got {len(frames)}")
-        # qwen-vl-utils pads to multiples of 2; keep even count explicitly.
         if len(frames) % 2 == 1:
             frames = frames + [frames[-1]]
         pil_frames = [Image.fromarray(f) for f in frames]
         prompt_text = build_mcq_prompt(question, options)
-
-        # FIXED frame count — pruning is token-level inside vLLM
-        video_cfg: dict[str, Any] = {
-            "type": "video",
-            "video": pil_frames,
-            "sample_fps": float(meta.fps) if meta.fps > 0 else 2.0,
-            "raw_fps": float(meta.fps) if meta.fps > 0 else 2.0,
-        }
-        if max_pixels is not None:
-            video_cfg["max_pixels"] = max_pixels
-
-        messages = [
-            {
-                "role": "user",
-                "content": [video_cfg, {"type": "text", "text": prompt_text}],
-            }
-        ]
         log.info(
-            "OpenCV decode: path=%s frames=%d size=%sx%s",
+            "OpenCV decode: path=%s frames=%d size=%sx%s prune=%.2f",
             video_path,
             len(pil_frames),
             frames[0].shape[1],
             frames[0].shape[0],
+            self.pruning_rate,
         )
 
-        text = self._processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        image_inputs, video_inputs, video_kwargs = process_vision_info(
-            messages,
-            image_patch_size=self._processor.image_processor.patch_size,
-            return_video_kwargs=True,
-            return_video_metadata=True,
-        )
-        if self.cfg.get("do_resize") is False:
+        if self.pruning_rate > 0:
+            # CRITICAL: do NOT run qwen_vl_utils.process_vision_info here.
+            # That expands a full unpruned video placeholder count (~4160). With
+            # video_pruning_rate>0, vLLM's Qwen3-VL processor must build the
+            # pruning-aware interleaved placeholders; otherwise M-RoPE recompute
+            # crashes (Target [3,0] vs [3,4160]). Pass sampled frames + metadata
+            # and let the engine multimodal processor run.
+            import torch
+
+            video_tchw = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).contiguous()
+            video_metadata = {
+                "fps": float(meta.fps) if meta.fps > 0 else 2.0,
+                "duration": float(meta.duration_sec),
+                "total_num_frames": int(len(frames)),
+                "frames_indices": list(range(len(frames))),
+                "video_backend": "opencv",
+            }
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video",
+                            "video": video_path,
+                            "nframes": len(frames),
+                        },
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }
+            ]
+            text = self._processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            mm_data: dict[str, Any] = {"video": (video_tchw, video_metadata)}
+            video_kwargs: dict[str, Any] = {
+                "do_sample_frames": False,
+                "cap_pixels_per_frame": self.cap_pixels_per_frame,
+            }
+            if max_pixels is not None:
+                video_kwargs["max_pixels"] = max_pixels
+            visual_pre = len(frames) * 64  # coarse; engine does real prune
+            decode_tag = "opencv_tensor_vllm_processor"
+        else:
+            from qwen_vl_utils import process_vision_info
+
+            video_cfg: dict[str, Any] = {
+                "type": "video",
+                "video": pil_frames,
+                "sample_fps": float(meta.fps) if meta.fps > 0 else 2.0,
+                "raw_fps": float(meta.fps) if meta.fps > 0 else 2.0,
+            }
+            if max_pixels is not None:
+                video_cfg["max_pixels"] = max_pixels
+            messages = [
+                {
+                    "role": "user",
+                    "content": [video_cfg, {"type": "text", "text": prompt_text}],
+                }
+            ]
+            text = self._processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs, video_kwargs = process_vision_info(
+                messages,
+                image_patch_size=self._processor.image_processor.patch_size,
+                return_video_kwargs=True,
+                return_video_metadata=True,
+            )
             video_kwargs = dict(video_kwargs or {})
-            video_kwargs["do_resize"] = False
-        video_kwargs = dict(video_kwargs or {})
-        video_kwargs["cap_pixels_per_frame"] = self.cap_pixels_per_frame
+            if self.cfg.get("do_resize") is False:
+                video_kwargs["do_resize"] = False
+            video_kwargs["cap_pixels_per_frame"] = self.cap_pixels_per_frame
+            mm_data = {}
+            if image_inputs is not None:
+                mm_data["image"] = image_inputs
+            if video_inputs is not None:
+                mm_data["video"] = video_inputs
+            visual_pre = _estimate_pre_prune_tokens(video_inputs, video_kwargs, baseline_num_frames)
+            decode_tag = "opencv_pil_frames"
 
-        mm_data: dict[str, Any] = {}
-        if image_inputs is not None:
-            mm_data["image"] = image_inputs
-        if video_inputs is not None:
-            mm_data["video"] = video_inputs
-
-        visual_pre = _estimate_pre_prune_tokens(video_inputs, video_kwargs, baseline_num_frames)
         visual_ret = retained_token_estimate(visual_pre or 0, self.pruning_rate) if visual_pre else None
 
         sp = self._SamplingParams(
@@ -374,7 +413,7 @@ class VLLMBackend(Backend):
                 "pruning_kind": "vllm_video_token_prune",
                 "video_pruning_method": self.pruning_method if self.pruning_rate > 0 else "none",
                 "tokens_retained_are_estimate": True,
-                "video_decode": "opencv_pil_frames",
+                "video_decode": decode_tag,
                 "cap_pixels_per_frame": self.cap_pixels_per_frame,
                 "latency_steady_state": self._warmed,
             },

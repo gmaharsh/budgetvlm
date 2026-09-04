@@ -196,6 +196,18 @@ class VLLMBackend(Backend):
         )
         if vpr is not None:
             kwargs["video_pruning_method"] = self.pruning_method
+            # vLLM bug class: MM prune + chunked prefill / prefix cache can zero out
+            # M-RoPE slices (Target [3,0] vs [3,4160]). Disable both for pruned engines.
+            # See: https://github.com/vllm-project/vllm/issues/48833
+            kwargs["enable_chunked_prefill"] = False
+            kwargs["enable_prefix_caching"] = False
+            # Keep the whole multimodal prefill in one schedule step.
+            kwargs["max_num_batched_tokens"] = int(self.cfg.get("max_model_len", 32768))
+            log.info(
+                "Pruning engine: enable_chunked_prefill=False enable_prefix_caching=False "
+                "max_num_batched_tokens=%s",
+                kwargs["max_num_batched_tokens"],
+            )
 
         self._llm = LLM(**kwargs)
         self._processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)

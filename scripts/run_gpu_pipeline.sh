@@ -4,10 +4,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-python -m venv .venv || true
+bash scripts/install_gpu_deps.sh
+# shellcheck disable=SC1091
 source .venv/bin/activate
-pip install -U pip
-pip install -r requirements-gpu.txt
 
 RUN_ID="${BUDGETVLM_RUN_ID:-runpod_$(date -u +%Y%m%dT%H%M%SZ)}"
 echo "=== run_id=${RUN_ID} ==="

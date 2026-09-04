@@ -1,7 +1,11 @@
-# CUDA machine only (RunPod / AWS GPU / local NVIDIA)
+# CUDA 12.x hosts only (RunPod A40 with driver CUDA 12.8).
+# Do NOT install default PyPI torch — it may pull cu13 and break nvidia-smi 12.8 drivers.
+#
+# Preferred install (on the pod):
+#   bash scripts/install_gpu_deps.sh
+#
 -r requirements.txt
-torch>=2.4
-vllm>=0.11.0
 transformers>=4.57.0
 qwen-vl-utils>=0.0.14
 accelerate>=0.33
+# torch + vllm are installed by scripts/install_gpu_deps.sh with cu128 indexes

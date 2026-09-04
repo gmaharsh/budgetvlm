@@ -4,9 +4,28 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-bash scripts/install_gpu_deps.sh
+# Install GPU deps only if CUDA is not already working in the venv
 # shellcheck disable=SC1091
-source .venv/bin/activate
+if [[ -f .venv/bin/activate ]]; then
+  source .venv/bin/activate
+fi
+NEED_INSTALL=1
+if python - <<'PY' 2>/dev/null
+import torch
+import vllm
+assert torch.cuda.is_available()
+assert "+cu12" in torch.__version__ or (torch.version.cuda or "").startswith("12.")
+print("reuse_ok", torch.__version__, getattr(vllm, "__version__", "?"))
+PY
+then
+  NEED_INSTALL=0
+  echo "=== Reusing existing CUDA venv ==="
+fi
+if [[ "${NEED_INSTALL}" == "1" || "${FORCE_GPU_INSTALL:-0}" == "1" ]]; then
+  bash scripts/install_gpu_deps.sh
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+fi
 
 RUN_ID="${BUDGETVLM_RUN_ID:-runpod_$(date -u +%Y%m%dT%H%M%SZ)}"
 echo "=== run_id=${RUN_ID} ==="

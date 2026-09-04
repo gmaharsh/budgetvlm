@@ -34,11 +34,13 @@ def main() -> None:
         examples = load_videomme_annotations(
             root=project_path(*(cfg["dataset"]["root"].split("/"))),
             limit=limit,
+            require_video=True,
         )
         missing = [e for e in examples if not e.video_path]
-        if missing:
+        if not examples or missing:
             raise SystemExit(
-                f"{len(missing)} examples missing video files. "
+                f"Need local videos under data/videomme/videos (got {len(examples)} examples, "
+                f"{len(missing)} missing). "
                 "Run: python -m src.download_videomme --with-videos-chunk1"
             )
 

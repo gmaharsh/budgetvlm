@@ -26,8 +26,8 @@ pip install --no-cache-dir torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 
 echo "=== vLLM 0.28.0+cu129 wheel ==="
 pip install --no-cache-dir "${VLLM_WHL}" --extra-index-url "${CU129}"
 
-echo "=== Ensure cuDNN ==="
-pip install --force-reinstall --no-cache-dir nvidia-cudnn-cu12 || true
+echo "=== Ensure cuDNN (exact pin for torch 2.13+cu129) ==="
+pip install --force-reinstall --no-cache-dir "nvidia-cudnn-cu12==9.20.0.48"
 
 echo "=== Sanity check ==="
 if ! python - <<'PY'

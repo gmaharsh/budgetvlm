@@ -70,12 +70,72 @@ def _normalize_answer(ans: Any) -> str:
     return s[0] if s and s[0] in "ABCD" else s
 
 
+def _index_local_videos(video_dir: Path) -> dict[str, Path]:
+    """Map file stem -> path for all mp4/webm under video_dir (recursive)."""
+    if not video_dir.is_dir():
+        return {}
+    out: dict[str, Path] = {}
+    for pattern in ("*.mp4", "*.webm", "*.mkv"):
+        for p in video_dir.rglob(pattern):
+            if p.is_file():
+                out.setdefault(p.stem, p)
+    return out
+
+
+def resolve_video_path(
+    video_dir: Path,
+    *,
+    video_id: str,
+    youtube_id: str = "",
+    row_path: str = "",
+    index: dict[str, Path] | None = None,
+) -> str:
+    """Resolve on-disk path for a Video-MME row.
+
+    Official files are named ``{videoID}.mp4`` (YouTube id), not ``{video_id}``.
+    Never returns ``.`` / cwd — empty string means missing.
+    """
+    if row_path:
+        rp = Path(row_path)
+        if rp.is_file():
+            return str(rp)
+
+    names: list[str] = []
+    for n in (youtube_id, video_id):
+        n = str(n or "").strip()
+        if n and n not in names:
+            names.append(n)
+
+    index = index if index is not None else _index_local_videos(video_dir)
+    for n in names:
+        hit = index.get(n)
+        if hit is not None and hit.is_file():
+            return str(hit)
+
+    # Shallow fallbacks (no empty Path — Path("") == "." and exists!)
+    for n in names:
+        for p in (
+            video_dir / f"{n}.mp4",
+            video_dir / "data" / f"{n}.mp4",
+            video_dir / n / f"{n}.mp4",
+            video_dir / f"{n}.webm",
+        ):
+            if p.is_file():
+                return str(p)
+    return ""
+
+
 def load_videomme_annotations(
     root: str | Path | None = None,
     limit: int | None = None,
     video_ids: list[str] | None = None,
+    require_video: bool = False,
 ) -> list[QAExample]:
-    """Load Video-MME QA rows. Prefers local parquet/csv under data/videomme."""
+    """Load Video-MME QA rows. Prefers local parquet/csv under data/videomme.
+
+    If ``limit`` is set, prefer videos that exist on disk so chunk-1 experiments
+    do not silently pick annotation rows whose mp4s were never downloaded.
+    """
     root = Path(root) if root else project_path("data", "videomme")
     ensure_dir(root)
 
@@ -92,26 +152,35 @@ def load_videomme_annotations(
     else:
         df = pd.read_csv(csv_path)
 
-    rows: list[QAExample] = []
     video_dir = root / "videos"
+    index = _index_local_videos(video_dir)
+    if index:
+        log.info("Indexed %d local video files under %s", len(index), video_dir)
+
+    rows: list[QAExample] = []
     for i, rec in df.iterrows():
         d = rec.to_dict()
-        vid = str(d.get("video_id") or d.get("videoID") or d.get("video") or "")
-        if video_ids is not None and vid not in video_ids:
+        # video_id = dataset ordinal; videoID = YouTube id used for filenames
+        vid = str(d.get("video_id") or d.get("video") or "")
+        yt = str(d.get("videoID") or d.get("video_ID") or "")
+        if not vid:
+            vid = yt
+        if video_ids is not None and vid not in video_ids and yt not in video_ids:
             continue
-        qid = str(d.get("question_id") or d.get("question_id") or d.get("id") or f"{vid}_{i}")
+        qid = str(d.get("question_id") or d.get("id") or f"{vid}_{i}")
         question = str(d.get("question") or d.get("Question") or "")
         answer = _normalize_answer(d.get("answer") or d.get("Answer") or d.get("response") or "")
         options = _normalize_options(d)
 
-        # locate video file
-        candidates = [
-            video_dir / f"{vid}.mp4",
-            video_dir / vid / f"{vid}.mp4",
-            video_dir / f"{vid}.webm",
-            Path(str(d.get("video_path") or "")),
-        ]
-        vpath = next((str(p) for p in candidates if p and Path(p).exists()), "")
+        vpath = resolve_video_path(
+            video_dir,
+            video_id=vid,
+            youtube_id=yt,
+            row_path=str(d.get("video_path") or ""),
+            index=index,
+        )
+        if require_video and not vpath:
+            continue
         rows.append(
             QAExample(
                 video_id=vid,
@@ -127,17 +196,39 @@ def load_videomme_annotations(
         )
 
     if limit is not None:
+        # Prefer rows with on-disk videos so chunk-1 runs are usable.
+        ordered = sorted(rows, key=lambda r: (0 if r.video_path else 1))
         keep: list[QAExample] = []
         seen: list[str] = []
-        for r in rows:
+        for r in ordered:
             if r.video_id not in seen:
                 if len(seen) >= limit:
                     break
+                if not r.video_path:
+                    # skip missing until we have enough present, unless none exist
+                    continue
                 seen.append(r.video_id)
-            keep.append(r)
+            if r.video_id in seen:
+                keep.append(r)
+        if not keep:
+            # Fall back to first N annotation videos (paths may still be empty).
+            keep = []
+            seen = []
+            for r in rows:
+                if r.video_id not in seen:
+                    if len(seen) >= limit:
+                        break
+                    seen.append(r.video_id)
+                keep.append(r)
         rows = keep
 
-    log.info("Loaded %d QA pairs across %d videos", len(rows), len({r.video_id for r in rows}))
+    n_with = sum(1 for r in rows if r.video_path)
+    log.info(
+        "Loaded %d QA pairs across %d videos (%d rows with local mp4)",
+        len(rows),
+        len({r.video_id for r in rows}),
+        n_with,
+    )
     return rows
 
 

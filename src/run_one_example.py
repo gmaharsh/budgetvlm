@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 from .backends import get_backend
 from .dataset_videomme import load_videomme_annotations, make_synthetic_dataset
@@ -31,15 +32,23 @@ def main() -> None:
             root=project_path(*(cfg["dataset"]["root"].split("/"))),
             limit=5,
             video_ids=[args.video_id] if args.video_id else None,
+            require_video=True,
         )
 
     if args.video_id:
-        examples = [e for e in examples if e.video_id == args.video_id]
+        examples = [
+            e
+            for e in examples
+            if e.video_id == args.video_id or Path(e.video_path).stem == args.video_id
+        ]
     if not examples:
-        raise SystemExit("No examples found")
+        raise SystemExit(
+            "No examples with local videos found. "
+            "Check data/videomme/videos after: python -m src.download_videomme --with-videos-chunk1"
+        )
     ex = examples[0]
-    if not ex.video_path:
-        raise SystemExit(f"Video file missing for {ex.video_id}")
+    if not ex.video_path or not Path(ex.video_path).is_file():
+        raise SystemExit(f"Video file missing for {ex.video_id} (path={ex.video_path!r})")
 
     backend = get_backend(backend_name, cfg, pruning_rate=args.pruning_rate)
     try:

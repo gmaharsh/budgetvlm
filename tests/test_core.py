@@ -72,6 +72,24 @@ def test_parse_s3_uri():
     assert parse_s3_uri("s3://my-bucket/") == ("my-bucket", "")
 
 
+def test_resolve_video_path_ignores_empty_and_uses_youtube_id(tmp_path):
+    from src.dataset_videomme import resolve_video_path
+
+    video_dir = tmp_path / "videos"
+    video_dir.mkdir()
+    mp4 = video_dir / "ytABC123.mp4"
+    mp4.write_bytes(b"fake")
+    # Path("") must never win (it is cwd ".")
+    assert resolve_video_path(video_dir, video_id="001", youtube_id="ytABC123") == str(mp4)
+    assert resolve_video_path(video_dir, video_id="missing", youtube_id="") == ""
+    nested = video_dir / "data" / "nestedVid.mp4"
+    nested.parent.mkdir()
+    nested.write_bytes(b"fake")
+    assert resolve_video_path(video_dir, video_id="x", youtube_id="nestedVid").endswith(
+        "nestedVid.mp4"
+    )
+
+
 def test_resolve_s3_uri(monkeypatch):
     monkeypatch.delenv("BUDGETVLM_S3_URI", raising=False)
     monkeypatch.delenv("BUDGETVLM_S3_BUCKET", raising=False)

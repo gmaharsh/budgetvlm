@@ -52,6 +52,15 @@ def main() -> None:
 
     backend = get_backend(backend_name, cfg, pruning_rate=args.pruning_rate)
     try:
+        backend.warmup(
+            video_path=ex.video_path,
+            question=ex.question,
+            options=ex.options,
+            pruning_rate=args.pruning_rate,
+            baseline_num_frames=int(cfg["video"]["baseline_num_frames"]),
+            max_pixels=cfg["video"].get("max_pixels"),
+            n=int(cfg.get("serving", {}).get("warmup_generates", 2)),
+        )
         row = run_one(
             backend,
             ex,

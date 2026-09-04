@@ -50,6 +50,19 @@ class Backend(ABC):
     ) -> InferResult:
         ...
 
+    def warmup(
+        self,
+        video_path: str,
+        question: str,
+        options: list[str],
+        pruning_rate: float,
+        baseline_num_frames: int,
+        max_pixels: int | None = None,
+        n: int = 2,
+    ) -> None:
+        """Run discarded generates so paper latency is steady-state / warm."""
+        return None
+
     def close(self) -> None:
         return None
 
@@ -152,6 +165,9 @@ class VLLMBackend(Backend):
         self._llm = None
         self._processor = None
         self._SamplingParams = None
+        self._warmed = False
+        self.cap_pixels_per_frame = bool(cfg.get("cap_pixels_per_frame", True))
+        self.warmup_generates = int(cfg.get("warmup_generates", 2))
 
     def _lazy_init(self) -> None:
         if self._llm is not None:
@@ -175,6 +191,8 @@ class VLLMBackend(Backend):
             max_model_len=int(self.cfg.get("max_model_len", 32768)),
             limit_mm_per_prompt={"video": 1},
             video_pruning_rate=vpr,
+            # Freeze HF/vLLM video processor policy (do not rely on version defaults).
+            mm_processor_kwargs={"cap_pixels_per_frame": self.cap_pixels_per_frame},
         )
         if vpr is not None:
             kwargs["video_pruning_method"] = self.pruning_method
@@ -182,10 +200,12 @@ class VLLMBackend(Backend):
         self._llm = LLM(**kwargs)
         self._processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
         self._SamplingParams = SamplingParams
+        self._warmed = False
 
     def close(self) -> None:
         self._llm = None
         self._processor = None
+        self._warmed = False
         gc.collect()
         try:
             import torch
@@ -194,6 +214,38 @@ class VLLMBackend(Backend):
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+    def warmup(
+        self,
+        video_path: str,
+        question: str,
+        options: list[str],
+        pruning_rate: float,
+        baseline_num_frames: int,
+        max_pixels: int | None = None,
+        n: int = 2,
+    ) -> None:
+        n_warm = self.warmup_generates if n is None else int(n)
+        if self._warmed or n_warm <= 0:
+            return
+        self._lazy_init()
+        for i in range(n_warm):
+            log.info(
+                "Warm-up generate %d/%d (discarded from latency stats) rate=%.2f",
+                i + 1,
+                n_warm,
+                self.pruning_rate,
+            )
+            self.infer_mcq(
+                video_path=video_path,
+                question=question,
+                options=options,
+                pruning_rate=pruning_rate,
+                baseline_num_frames=baseline_num_frames,
+                max_pixels=max_pixels,
+            )
+        self._warmed = True
+        log.info("Steady-state latency measurement begins after %d warm-up generates", n_warm)
 
     def infer_mcq(
         self,
@@ -263,6 +315,8 @@ class VLLMBackend(Backend):
         if self.cfg.get("do_resize") is False:
             video_kwargs = dict(video_kwargs or {})
             video_kwargs["do_resize"] = False
+        video_kwargs = dict(video_kwargs or {})
+        video_kwargs["cap_pixels_per_frame"] = self.cap_pixels_per_frame
 
         mm_data: dict[str, Any] = {}
         if image_inputs is not None:
@@ -284,7 +338,7 @@ class VLLMBackend(Backend):
                 {
                     "prompt": text,
                     "multi_modal_data": mm_data,
-                    "mm_processor_kwargs": video_kwargs or {},
+                    "mm_processor_kwargs": video_kwargs,
                 }
             ],
             sampling_params=sp,
@@ -309,6 +363,8 @@ class VLLMBackend(Backend):
                 "video_pruning_method": self.pruning_method if self.pruning_rate > 0 else "none",
                 "tokens_retained_are_estimate": True,
                 "video_decode": "opencv_pil_frames",
+                "cap_pixels_per_frame": self.cap_pixels_per_frame,
+                "latency_steady_state": self._warmed,
             },
         )
 

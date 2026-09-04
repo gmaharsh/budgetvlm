@@ -12,6 +12,10 @@ serving:
   max_model_len: 32768
   # Qwen3-VL + vLLM: avoid HF re-resize crushing spatial tokens
   do_resize: false
+  # Freeze Qwen3-VL video processor policy (reference per-frame pixel cap).
+  cap_pixels_per_frame: true
+  # Discarded generates after each new engine (mandatory for paper latency).
+  warmup_generates: 2
 
 dataset:
   name: Video-MME

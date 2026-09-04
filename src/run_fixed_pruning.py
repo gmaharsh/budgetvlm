@@ -57,6 +57,16 @@ def main() -> None:
         log.info("=== rate=%.2f (%s) | fixed_frames=%d ===", rate, rate_tag(rate), baseline_frames)
         backend = get_backend(backend_name, cfg, pruning_rate=rate)
         try:
+            warm = examples[0]
+            backend.warmup(
+                video_path=warm.video_path,
+                question=warm.question,
+                options=warm.options,
+                pruning_rate=rate,
+                baseline_num_frames=baseline_frames,
+                max_pixels=max_pixels,
+                n=int(cfg.get("serving", {}).get("warmup_generates", 2)),
+            )
             for ex in examples:
                 log.info("%s q=%s rate=%.2f", ex.video_id, ex.question_id, rate)
                 row = run_one(backend, ex, rate, baseline_frames, max_pixels)

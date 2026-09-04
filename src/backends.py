@@ -175,6 +175,10 @@ class VLLMBackend(Backend):
         from vllm import LLM, SamplingParams
         from transformers import AutoProcessor
 
+        from .vllm_patches import apply_qwen3_vl_mrope_patch
+
+        apply_qwen3_vl_mrope_patch()
+
         rate = self.pruning_rate
         # vLLM: pruning enabled when rate > 0
         vpr = None if rate <= 0.0 else rate
@@ -298,29 +302,21 @@ class VLLMBackend(Backend):
 
         if self.pruning_rate > 0:
             # CRITICAL: do NOT run qwen_vl_utils.process_vision_info here.
-            # That expands a full unpruned video placeholder count (~4160). With
+            # That expands a full unpruned video placeholder count. With
             # video_pruning_rate>0, vLLM's Qwen3-VL processor must build the
-            # pruning-aware interleaved placeholders; otherwise M-RoPE recompute
-            # crashes (Target [3,0] vs [3,4160]). Pass sampled frames + metadata
-            # and let the engine multimodal processor run.
-            import torch
-
-            video_tchw = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).contiguous()
-            video_metadata = {
-                "fps": float(meta.fps) if meta.fps > 0 else 2.0,
-                "duration": float(meta.duration_sec),
-                "total_num_frames": int(len(frames)),
-                "frames_indices": list(range(len(frames))),
-                "video_backend": "opencv",
-            }
+            # pruning-aware interleaved placeholders.
+            #
+            # Pass a list of PIL frames (THWC semantics). A raw TCHW torch
+            # tensor was mis-parsed as a tiny spatial grid [16,4,8] and still
+            # crashed M-RoPE; PIL/list is the documented offline video format.
             messages = [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "video",
-                            "video": video_path,
-                            "nframes": len(frames),
+                            "video": pil_frames,
+                            "nframes": len(pil_frames),
                         },
                         {"type": "text", "text": prompt_text},
                     ],
@@ -329,15 +325,17 @@ class VLLMBackend(Backend):
             text = self._processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            mm_data: dict[str, Any] = {"video": (video_tchw, video_metadata)}
+            mm_data: dict[str, Any] = {"video": pil_frames}
             video_kwargs: dict[str, Any] = {
+                # Already sampled with OpenCV — do not resample inside HF/vLLM.
                 "do_sample_frames": False,
                 "cap_pixels_per_frame": self.cap_pixels_per_frame,
             }
             if max_pixels is not None:
                 video_kwargs["max_pixels"] = max_pixels
-            visual_pre = len(frames) * 64  # coarse; engine does real prune
-            decode_tag = "opencv_tensor_vllm_processor"
+            # Pre-prune estimate: processor will set real grid; use frame*64 proxy.
+            visual_pre = len(frames) * 64
+            decode_tag = "opencv_pil_vllm_processor"
         else:
             from qwen_vl_utils import process_vision_info
 

@@ -9,7 +9,12 @@ from .complexity import score_video
 from .dataset_videomme import iter_unique_videos, make_synthetic_dataset
 from .evaluate import accuracy, summarize_by_pruning
 from .infer import run_matrix
-from .policy import adaptive_pruning_rate, aggregate_video_correctness, max_safe_pruning_rate
+from .policy import (
+    adaptive_pruning_rate,
+    aggregate_video_correctness,
+    max_observed_correct_rate,
+    max_safe_pruning_rate,
+)
 from .utils import ensure_dir, get_logger, load_config, project_path, set_seed, write_json, write_jsonl
 
 log = get_logger("smoke")
@@ -53,7 +58,8 @@ def main() -> None:
             {
                 "video_id": vid,
                 "max_safe_pruning_rate": max_safe_pruning_rate(outcomes, rates),
-                **{f"correct_p{int(r * 100):02d}": outcomes.get(r, False) for r in rates},
+                "max_observed_correct_rate": max_observed_correct_rate(outcomes, rates),
+                **{f"all_correct_p{int(r * 100):02d}": outcomes.get(r, False) for r in rates},
             }
         )
     write_jsonl(project_path("results", "metrics", "smoke_tolerance.jsonl"), tolerance)
@@ -64,8 +70,6 @@ def main() -> None:
             qs[0].video_path,
             vid,
             num_frames=int(cfg["complexity"]["num_frames"]),
-            alpha=float(cfg["complexity"]["alpha_motion"]),
-            beta=float(cfg["complexity"]["beta_scene"]),
             use_scene=False,
         )
         cx_rows.append(
@@ -87,8 +91,7 @@ def main() -> None:
         rate = adaptive_pruning_rate(cx_map[ex.video_id], t1, t2)
         budget_rows.append(index[(ex.video_id, ex.question_id, rate)])
         safe = next(t["max_safe_pruning_rate"] for t in tolerance if t["video_id"] == ex.video_id)
-        oracle_rate = safe if safe > 0 else 0.0
-        oracle_rows.append(index[(ex.video_id, ex.question_id, float(oracle_rate))])
+        oracle_rows.append(index[(ex.video_id, ex.question_id, float(safe))])
 
     comparison = build_comparison(
         {
@@ -105,13 +108,14 @@ def main() -> None:
         project_path("results", "metrics", "smoke_status.json"),
         {
             "phase": "smoke_complete",
+            "pruning_kind": "simulated_token_prune_fixed_frames",
             "n_videos": args.n_videos,
             "backend": "mock",
-            "note": "Replace backend=vllm on a CUDA host for real Qwen3-VL runs.",
+            "note": "Real runs use vLLM video_pruning_rate + VidCom2 with fixed frames.",
         },
     )
     log.info("\n%s", comparison.to_string(index=False))
-    log.info("Smoke pipeline OK. Results under results/metrics/")
+    log.info("Smoke pipeline OK.")
 
 
 if __name__ == "__main__":

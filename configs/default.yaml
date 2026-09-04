@@ -28,16 +28,22 @@ video:
 
 pruning:
   rates: [0.0, 0.25, 0.5, 0.75]
-  # retained_frames = ceil(baseline_num_frames * (1 - rate))
+  # Real vLLM: engine-level token pruning AFTER vision encoder (not frame drop).
+  # Frames stay fixed at video.baseline_num_frames for all rates.
+  kind: vllm_video_token_prune
+  video_pruning_method: vidcom2  # vidcom2 | evs (EVS as ablation only)
+  # retained_tokens_est ≈ visual_tokens_pre * (1 - rate)
 
 complexity:
   num_frames: 8
   alpha_motion: 0.7
   beta_scene: 0.3
   scene_threshold: 0.35
-  # thresholds chosen on a held-out calibration split, then frozen
-  t1: 0.15   # complexity < t1 → prune 0.75
-  t2: 0.40   # complexity < t2 → prune 0.50 else 0.25
+  # SMOKE / local defaults only. For paper runs:
+  #   python -m src.calibrate_thresholds --predictions ... --complexity ...
+  # then freeze the chosen values here (or pass --t1/--t2).
+  t1: 0.15
+  t2: 0.40
   calibration_fraction: 0.3
 
 paths:

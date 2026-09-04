@@ -1,4 +1,4 @@
-"""Phase 4–5: fixed pruning matrix 0/25/50/75%."""
+"""Phase 4–5: fixed pruning matrix using one vLLM engine per rate."""
 from __future__ import annotations
 
 import argparse
@@ -6,9 +6,9 @@ import argparse
 from .backends import get_backend
 from .dataset_videomme import load_videomme_annotations, make_synthetic_dataset
 from .evaluate import summarize_by_pruning
-from .infer import run_matrix
+from .infer import run_one
 from .pruning import rate_tag
-from .utils import ensure_dir, get_logger, load_config, project_path, set_seed
+from .utils import append_jsonl, ensure_dir, get_logger, load_config, project_path, set_seed
 
 log = get_logger("fixed")
 
@@ -42,24 +42,33 @@ def main() -> None:
                 "Run: python -m src.download_videomme --with-videos-chunk1"
             )
 
-    backend = get_backend(backend_name, cfg)
     out = project_path("results", "predictions", f"{args.tag}_{backend_name}.jsonl")
-    rows = run_matrix(
-        backend,
-        examples,
-        rates,
-        baseline_num_frames=int(cfg["video"]["baseline_num_frames"]),
-        max_pixels=cfg["video"].get("max_pixels"),
-        out_jsonl=str(out),
-    )
+    ensure_dir(out.parent)
+    open(out, "w").close()
+
+    baseline_frames = int(cfg["video"]["baseline_num_frames"])
+    max_pixels = cfg["video"].get("max_pixels")
+    rows: list[dict] = []
+
+    # One engine per rate for vLLM (engine-level video_pruning_rate)
+    for rate in rates:
+        log.info("=== rate=%.2f (%s) | fixed_frames=%d ===", rate, rate_tag(rate), baseline_frames)
+        backend = get_backend(backend_name, cfg, pruning_rate=rate)
+        try:
+            for ex in examples:
+                log.info("%s q=%s rate=%.2f", ex.video_id, ex.question_id, rate)
+                row = run_one(backend, ex, rate, baseline_frames, max_pixels)
+                append_jsonl(str(out), row)
+                rows.append(row)
+        finally:
+            backend.close()
+
     summary = summarize_by_pruning(rows)
     ensure_dir(project_path("results", "metrics"))
     summary_path = project_path("results", "metrics", f"{args.tag}_{backend_name}_by_rate.csv")
     summary.to_csv(summary_path, index=False)
     log.info("Wrote %s (%d rows)", out, len(rows))
     log.info("\n%s", summary.to_string(index=False))
-    for r in rates:
-        log.info("rate tag %s ready", rate_tag(r))
 
 
 if __name__ == "__main__":

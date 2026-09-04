@@ -38,8 +38,10 @@ def run_one(
         "ground_truth": example.answer,
         "correct": correct,
         "latency_sec": result.latency_sec,
-        "ttft_sec": result.ttft_sec,
-        "visual_tokens": result.visual_tokens,
+        "ttft_sec": result.ttft_sec,  # None until streaming instrumentation
+        "visual_tokens": result.visual_tokens_retained_est,
+        "visual_tokens_pre": result.visual_tokens_pre,
+        "visual_tokens_retained_est": result.visual_tokens_retained_est,
         "pruning_rate": pruning_rate,
         "n_frames": result.n_frames,
         "video_duration_sec": result.video_duration_sec,
@@ -59,14 +61,14 @@ def run_matrix(
     max_pixels: int | None,
     out_jsonl: str,
 ) -> list[dict[str, Any]]:
+    """Run all examples × rates with a backend that accepts any rate (mock)."""
     ensure_dir(out_jsonl.rsplit("/", 1)[0] if "/" in out_jsonl else ".")
-    # fresh file
     open(out_jsonl, "w").close()
     rows: list[dict[str, Any]] = []
     total = len(examples) * len(rates)
     i = 0
-    for ex in examples:
-        for rate in rates:
+    for rate in rates:
+        for ex in examples:
             i += 1
             log.info(
                 "[%d/%d] %s q=%s rate=%.2f",

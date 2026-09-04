@@ -41,21 +41,27 @@ def main() -> None:
     if not ex.video_path:
         raise SystemExit(f"Video file missing for {ex.video_id}")
 
-    backend = get_backend(backend_name, cfg)
-    row = run_one(
-        backend,
-        ex,
-        pruning_rate=args.pruning_rate,
-        baseline_num_frames=int(cfg["video"]["baseline_num_frames"]),
-        max_pixels=cfg["video"].get("max_pixels"),
-    )
+    backend = get_backend(backend_name, cfg, pruning_rate=args.pruning_rate)
+    try:
+        row = run_one(
+            backend,
+            ex,
+            pruning_rate=args.pruning_rate,
+            baseline_num_frames=int(cfg["video"]["baseline_num_frames"]),
+            max_pixels=cfg["video"].get("max_pixels"),
+        )
+    finally:
+        backend.close()
     print(json.dumps(row, indent=2))
     log.info(
-        "prediction=%s gt=%s correct=%s latency=%.3fs",
+        "prediction=%s gt=%s correct=%s latency=%.3fs frames=%s tokens_pre=%s tokens_ret_est=%s",
         row["prediction"],
         row["ground_truth"],
         row["correct"],
         row["latency_sec"],
+        row["n_frames"],
+        row.get("visual_tokens_pre"),
+        row.get("visual_tokens_retained_est"),
     )
 
 

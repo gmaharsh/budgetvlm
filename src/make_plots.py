@@ -56,13 +56,14 @@ def plot_accuracy_vs_pruning(by_rate_csv, out_path) -> None:
 
 def plot_accuracy_vs_cost(by_rate_csv, out_path) -> None:
     df = pd.read_csv(by_rate_csv)
+    xcol = "avg_latency_sec" if "avg_latency_sec" in df.columns else "avg_ttft_sec"
     fig, ax = plt.subplots(figsize=(5, 4))
-    ax.plot(df["avg_ttft_sec"], df["accuracy"], marker="o")
+    ax.plot(df[xcol], df["accuracy"], marker="o")
     for _, r in df.iterrows():
-        ax.annotate(f"{int(r['pruning_rate']*100)}%", (r["avg_ttft_sec"], r["accuracy"]))
-    ax.set_xlabel("avg TTFT (s)")
+        ax.annotate(f"{int(r['pruning_rate']*100)}%", (r[xcol], r["accuracy"]))
+    ax.set_xlabel("avg end-to-end latency (s)")
     ax.set_ylabel("accuracy")
-    ax.set_title("Accuracy vs TTFT")
+    ax.set_title("Accuracy vs latency")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -84,7 +85,7 @@ def main() -> None:
         plot_complexity_vs_safe(cx, tol, fig_dir / f"{args.prefix}_complexity_vs_safe.png")
     if by_rate.exists():
         plot_accuracy_vs_pruning(by_rate, fig_dir / f"{args.prefix}_acc_vs_pruning.png")
-        plot_accuracy_vs_cost(by_rate, fig_dir / f"{args.prefix}_acc_vs_ttft.png")
+        plot_accuracy_vs_cost(by_rate, fig_dir / f"{args.prefix}_acc_vs_latency.png")
 
 
 if __name__ == "__main__":

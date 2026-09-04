@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import argparse
 
-from .policy import aggregate_video_correctness, max_safe_pruning_rate
+from .evaluate import per_video_accuracy
+from .policy import (
+    aggregate_video_accuracy,
+    aggregate_video_correctness,
+    max_observed_correct_rate,
+    max_safe_pruning_rate,
+)
 from .utils import get_logger, load_config, project_path, read_jsonl, write_jsonl
 
 log = get_logger("tolerance")
@@ -12,11 +18,7 @@ log = get_logger("tolerance")
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
-    ap.add_argument(
-        "--predictions",
-        default=None,
-        help="jsonl from run_fixed_pruning / smoke",
-    )
+    ap.add_argument("--predictions", default=None)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     cfg = load_config(args.config)
@@ -30,15 +32,19 @@ def main() -> None:
         raise SystemExit(f"No predictions at {pred_path}")
 
     rates = sorted({float(r["pruning_rate"]) for r in rows})
-    by_vid = aggregate_video_correctness(rows)
+    by_all = aggregate_video_correctness(rows)
+    by_acc = aggregate_video_accuracy(rows)
     out_rows = []
-    for vid, outcomes in sorted(by_vid.items()):
-        safe = max_safe_pruning_rate(outcomes, rates)
+    for vid in sorted(by_all.keys()):
+        outcomes = by_all[vid]
+        accs = by_acc.get(vid, {})
         out_rows.append(
             {
                 "video_id": vid,
-                "max_safe_pruning_rate": safe,
-                **{f"correct_p{int(r * 100):02d}": outcomes.get(r, False) for r in rates},
+                "max_safe_pruning_rate": max_safe_pruning_rate(outcomes, rates),
+                "max_observed_correct_rate": max_observed_correct_rate(outcomes, rates),
+                **{f"all_correct_p{int(r * 100):02d}": outcomes.get(r, False) for r in rates},
+                **{f"acc_p{int(r * 100):02d}": accs.get(r, 0.0) for r in rates},
             }
         )
 
@@ -48,10 +54,18 @@ def main() -> None:
         else project_path("results", "metrics", "tolerance.jsonl")
     )
     write_jsonl(out, out_rows)
+    per_video_accuracy(rows).to_csv(
+        project_path("results", "metrics", "per_video_accuracy.csv"), index=False
+    )
     n_diff = len({r["max_safe_pruning_rate"] for r in out_rows})
-    log.info("Wrote %s (%d videos, %d distinct safe rates)", out, len(out_rows), n_diff)
+    log.info("Wrote %s (%d videos, %d distinct strict-safe rates)", out, len(out_rows), n_diff)
     for r in out_rows[:10]:
-        log.info("%s -> safe=%.2f", r["video_id"], r["max_safe_pruning_rate"])
+        log.info(
+            "%s -> strict_safe=%.2f observed_max=%.2f",
+            r["video_id"],
+            r["max_safe_pruning_rate"],
+            r["max_observed_correct_rate"],
+        )
 
 
 if __name__ == "__main__":

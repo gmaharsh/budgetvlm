@@ -4,17 +4,25 @@ from __future__ import annotations
 import numpy as np
 
 from src.complexity import frame_difference_complexity, scene_change_score
-from src.policy import adaptive_pruning_rate, max_safe_pruning_rate
+from src.policy import (
+    adaptive_pruning_rate,
+    max_observed_correct_rate,
+    max_safe_pruning_rate,
+)
 from src.prompts import extract_letter, is_correct
-from src.pruning import retained_frames
+from src.pruning import retained_frames, retained_token_estimate
 from src.s3_sync import parse_s3_uri, resolve_s3_uri
 
 
-def test_retained_frames():
+def test_retained_frames_legacy():
     assert retained_frames(32, 0.0) == 32
-    assert retained_frames(32, 0.25) == 24
-    assert retained_frames(32, 0.50) == 16
     assert retained_frames(32, 0.75) == 8
+
+
+def test_retained_token_estimate():
+    assert retained_token_estimate(1000, 0.0) == 1000
+    assert retained_token_estimate(1000, 0.25) == 750
+    assert retained_token_estimate(1000, 0.75) == 250
 
 
 def test_extract_letter():
@@ -33,6 +41,13 @@ def test_max_safe_pruning():
     assert max_safe_pruning_rate({0.0: True, 0.25: True, 0.5: False, 0.75: False}) == 0.25
     assert max_safe_pruning_rate({0.0: True, 0.25: True, 0.5: True, 0.75: True}) == 0.75
     assert max_safe_pruning_rate({0.0: False, 0.25: True}) == 0.0
+
+
+def test_max_observed_allows_nonmonotonic():
+    # 50% wrong but 75% correct → observed max is 75%, strict safe stops at 25%
+    outcomes = {0.0: True, 0.25: True, 0.5: False, 0.75: True}
+    assert max_safe_pruning_rate(outcomes) == 0.25
+    assert max_observed_correct_rate(outcomes) == 0.75
 
 
 def test_adaptive_policy():

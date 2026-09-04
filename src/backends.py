@@ -1,6 +1,7 @@
-"""Inference backends: mock (local), vLLM (CUDA), transformers (optional)."""
+"""Inference backends: mock (local), vLLM with engine-level video token pruning."""
 from __future__ import annotations
 
+import gc
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -9,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from .prompts import build_mcq_prompt, extract_letter
-from .pruning import retained_frames
+from .pruning import retained_token_estimate
 from .utils import get_logger
 from .video_io import load_frames, probe_video
 
@@ -20,13 +21,19 @@ log = get_logger("backend")
 class InferResult:
     prediction: str
     raw_text: str
-    latency_sec: float
-    ttft_sec: float
+    latency_sec: float  # end-to-end generation latency (primary)
+    ttft_sec: float | None  # None until streaming instrumentation exists
     n_frames: int
-    visual_tokens: int | None
+    visual_tokens_pre: int | None
+    visual_tokens_retained_est: int | None
     pruning_rate: float
     video_duration_sec: float
     meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def visual_tokens(self) -> int | None:
+        """Backward-compatible alias → estimated retained tokens."""
+        return self.visual_tokens_retained_est
 
 
 class Backend(ABC):
@@ -43,14 +50,12 @@ class Backend(ABC):
     ) -> InferResult:
         ...
 
+    def close(self) -> None:
+        return None
+
 
 class MockBackend(Backend):
-    """Deterministic stand-in so Phases 3–12 can be tested without CUDA.
-
-    Uses measured complexity to decide a max-safe pruning rate. If
-    ``ground_truth`` is provided, returns it when pruning is safe, else a
-    wrong letter — so accuracy vs pruning behaves like the hypothesis.
-    """
+    """Offline stand-in: fixed frames, cost scales with retained-token estimate."""
 
     def __init__(self, seed: int = 42, t1: float = 0.15, t2: float = 0.40):
         self.rng = np.random.default_rng(seed)
@@ -70,12 +75,11 @@ class MockBackend(Backend):
         from .complexity import frame_difference_complexity
 
         t0 = time.perf_counter()
-        n_keep = retained_frames(baseline_num_frames, pruning_rate)
-        frames, meta = load_frames(video_path, num_frames=max(8, n_keep), resize_max=128)
+        # Fixed frame budget (matches real vLLM experiment)
+        frames, meta = load_frames(video_path, num_frames=baseline_num_frames, resize_max=128)
         probe = frames[:: max(1, len(frames) // 8)][:8]
         cx = frame_difference_complexity(probe)
 
-        # High complexity → less pruning tolerance
         if cx < self.t1:
             safe_rate = 0.75
         elif cx < self.t2:
@@ -94,49 +98,95 @@ class MockBackend(Backend):
             wrong = [L for L in "ABCD" if L != true_letter]
             pred = wrong[int(self.rng.integers(0, len(wrong)))]
 
-        visual_tokens = n_keep * 64
-        ttft = 0.05 + 0.002 * visual_tokens * (1.0 + 0.5 * cx)
-        latency = (time.perf_counter() - t0) + ttft
+        visual_pre = baseline_num_frames * 64
+        visual_ret = retained_token_estimate(visual_pre, pruning_rate)
+        # Simulate LLM-prefill cost scaling with retained tokens (not vision encode)
+        latency = (time.perf_counter() - t0) + (0.05 + 0.002 * visual_ret * (1.0 + 0.5 * cx))
 
         return InferResult(
             prediction=pred,
             raw_text=pred,
             latency_sec=latency,
-            ttft_sec=ttft,
-            n_frames=n_keep,
-            visual_tokens=visual_tokens,
+            ttft_sec=None,
+            n_frames=baseline_num_frames,
+            visual_tokens_pre=visual_pre,
+            visual_tokens_retained_est=visual_ret,
             pruning_rate=pruning_rate,
             video_duration_sec=meta.duration_sec,
-            meta={"complexity_probe": cx, "safe_rate": safe_rate, "backend": "mock"},
+            meta={
+                "complexity_probe": cx,
+                "safe_rate": safe_rate,
+                "backend": "mock",
+                "pruning_kind": "simulated_token_prune",
+            },
         )
 
 
 class VLLMBackend(Backend):
-    """Qwen3-VL via vLLM offline inference."""
+    """Qwen3-VL via vLLM with engine-level ``video_pruning_rate`` (VidCom2).
 
-    def __init__(self, model_name: str, cfg: dict[str, Any] | None = None):
+    Important: ``video_pruning_rate`` is an *engine* setting. This backend is
+    constructed for a single fixed rate. For a full matrix, create one backend
+    per rate (see ``run_fixed_pruning``) to avoid OOM from multiple engines.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        cfg: dict[str, Any] | None = None,
+        *,
+        pruning_rate: float = 0.0,
+    ):
         cfg = cfg or {}
         self.model_name = model_name
         self.cfg = cfg
+        self.pruning_rate = float(pruning_rate)
+        self.pruning_method = str(cfg.get("video_pruning_method", "vidcom2"))
         self._llm = None
         self._processor = None
+        self._SamplingParams = None
 
     def _lazy_init(self) -> None:
         if self._llm is not None:
             return
-        from vllm import LLM, SamplingParams  # noqa: F401
+        from vllm import LLM, SamplingParams
         from transformers import AutoProcessor
 
-        log.info("Loading vLLM model %s ...", self.model_name)
-        self._llm = LLM(
+        rate = self.pruning_rate
+        # vLLM: pruning enabled when rate > 0
+        vpr = None if rate <= 0.0 else rate
+        log.info(
+            "Loading vLLM %s | frames=FIXED | video_pruning_rate=%s | method=%s",
+            self.model_name,
+            vpr,
+            self.pruning_method if vpr else "n/a",
+        )
+        kwargs: dict[str, Any] = dict(
             model=self.model_name,
             trust_remote_code=True,
             gpu_memory_utilization=float(self.cfg.get("gpu_memory_utilization", 0.9)),
             max_model_len=int(self.cfg.get("max_model_len", 32768)),
             limit_mm_per_prompt={"video": 1},
+            video_pruning_rate=vpr,
         )
+        if vpr is not None:
+            kwargs["video_pruning_method"] = self.pruning_method
+
+        self._llm = LLM(**kwargs)
         self._processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
         self._SamplingParams = SamplingParams
+
+    def close(self) -> None:
+        self._llm = None
+        self._processor = None
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def infer_mcq(
         self,
@@ -148,17 +198,22 @@ class VLLMBackend(Backend):
         max_pixels: int | None = None,
         ground_truth: str | None = None,
     ) -> InferResult:
+        if abs(float(pruning_rate) - self.pruning_rate) > 1e-9:
+            raise ValueError(
+                f"VLLMBackend was built for pruning_rate={self.pruning_rate}, "
+                f"got request rate={pruning_rate}. Use one engine per rate."
+            )
         self._lazy_init()
         from qwen_vl_utils import process_vision_info
 
-        n_keep = retained_frames(baseline_num_frames, pruning_rate)
         meta = probe_video(video_path)
         prompt_text = build_mcq_prompt(question, options)
 
+        # FIXED frame count — pruning is token-level inside vLLM
         video_cfg: dict[str, Any] = {
             "type": "video",
             "video": video_path,
-            "nframes": n_keep,
+            "nframes": baseline_num_frames,
         }
         if max_pixels is not None:
             video_cfg["max_pixels"] = max_pixels
@@ -166,10 +221,7 @@ class VLLMBackend(Backend):
         messages = [
             {
                 "role": "user",
-                "content": [
-                    video_cfg,
-                    {"type": "text", "text": prompt_text},
-                ],
+                "content": [video_cfg, {"type": "text", "text": prompt_text}],
             }
         ]
 
@@ -182,7 +234,6 @@ class VLLMBackend(Backend):
             return_video_kwargs=True,
             return_video_metadata=True,
         )
-        # Critical for Video-MME accuracy under vLLM (avoid double-resize)
         if self.cfg.get("do_resize") is False:
             video_kwargs = dict(video_kwargs or {})
             video_kwargs["do_resize"] = False
@@ -193,16 +244,8 @@ class VLLMBackend(Backend):
         if video_inputs is not None:
             mm_data["video"] = video_inputs
 
-        visual_tokens = None
-        try:
-            # rough count from grid if present
-            if hasattr(video_inputs, "shape"):
-                visual_tokens = int(np.prod(video_inputs.shape) // 3)  # fallback
-            thw = video_kwargs.get("video_grid_thw") if isinstance(video_kwargs, dict) else None
-            if thw is not None:
-                visual_tokens = int(np.array(thw).prod())
-        except Exception:
-            visual_tokens = n_keep * 64
+        visual_pre = _estimate_pre_prune_tokens(video_inputs, video_kwargs, baseline_num_frames)
+        visual_ret = retained_token_estimate(visual_pre or 0, self.pruning_rate) if visual_pre else None
 
         sp = self._SamplingParams(
             temperature=float(self.cfg.get("temperature", 0.0)),
@@ -210,12 +253,6 @@ class VLLMBackend(Backend):
         )
 
         t0 = time.perf_counter()
-        ttft_box = {"t": None}
-
-        def _on_first_tok():
-            if ttft_box["t"] is None:
-                ttft_box["t"] = time.perf_counter()
-
         outputs = self._llm.generate(
             [
                 {
@@ -228,23 +265,51 @@ class VLLMBackend(Backend):
         )
         latency = time.perf_counter() - t0
         raw = outputs[0].outputs[0].text if outputs else ""
-        # vLLM offline doesn't expose TTFT easily; approximate with latency for short gens
-        ttft = ttft_box["t"] - t0 if ttft_box["t"] else latency
 
         return InferResult(
             prediction=extract_letter(raw) or raw.strip()[:1].upper(),
             raw_text=raw,
             latency_sec=latency,
-            ttft_sec=ttft,
-            n_frames=n_keep,
-            visual_tokens=visual_tokens,
-            pruning_rate=pruning_rate,
+            ttft_sec=None,  # do not fake TTFT
+            n_frames=baseline_num_frames,
+            visual_tokens_pre=visual_pre,
+            visual_tokens_retained_est=visual_ret,
+            pruning_rate=self.pruning_rate,
             video_duration_sec=meta.duration_sec,
-            meta={"backend": "vllm", "model": self.model_name},
+            meta={
+                "backend": "vllm",
+                "model": self.model_name,
+                "pruning_kind": "vllm_video_token_prune",
+                "video_pruning_method": self.pruning_method if self.pruning_rate > 0 else "none",
+                "tokens_retained_are_estimate": True,
+            },
         )
 
 
-def get_backend(name: str, cfg: dict[str, Any]) -> Backend:
+def _estimate_pre_prune_tokens(video_inputs: Any, video_kwargs: Any, n_frames: int) -> int | None:
+    """Best-effort pre-pruning visual token count from processor metadata."""
+    try:
+        if isinstance(video_kwargs, dict):
+            thw = video_kwargs.get("video_grid_thw")
+            if thw is not None:
+                arr = np.array(thw)
+                # grid_thw often [T, H, W] patch grid; tokens ≈ prod / merge^2.
+                # Without merge size here, report prod as upper-bound patch cells.
+                return int(arr.reshape(-1)[-3:].prod()) if arr.size >= 3 else int(arr.prod())
+        if hasattr(video_inputs, "shape"):
+            # last-resort: not trustworthy — still record something labeled estimate
+            return int(np.prod(video_inputs.shape) // max(1, 3))
+    except Exception:
+        pass
+    return n_frames * 64
+
+
+def get_backend(
+    name: str,
+    cfg: dict[str, Any],
+    *,
+    pruning_rate: float | None = None,
+) -> Backend:
     name = (name or "mock").lower()
     if name == "mock":
         cx = cfg.get("complexity", {})
@@ -254,5 +319,10 @@ def get_backend(name: str, cfg: dict[str, Any]) -> Backend:
             t2=float(cx.get("t2", 0.40)),
         )
     if name == "vllm":
-        return VLLMBackend(cfg["model"]["name"], {**cfg.get("serving", {}), **cfg.get("model", {})})
+        rate = 0.0 if pruning_rate is None else float(pruning_rate)
+        return VLLMBackend(
+            cfg["model"]["name"],
+            {**cfg.get("serving", {}), **cfg.get("model", {}), **cfg.get("pruning", {})},
+            pruning_rate=rate,
+        )
     raise ValueError(f"Unknown backend: {name}")

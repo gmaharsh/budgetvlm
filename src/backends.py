@@ -306,9 +306,29 @@ class VLLMBackend(Backend):
             # video_pruning_rate>0, vLLM's Qwen3-VL processor must build the
             # pruning-aware interleaved placeholders.
             #
-            # Pass a list of PIL frames (THWC semantics). A raw TCHW torch
-            # tensor was mis-parsed as a tiny spatial grid [16,4,8] and still
-            # crashed M-RoPE; PIL/list is the documented offline video format.
+            # Qwen3-VL (video_needs_metadata=True) requires multi_modal_data
+            # video as (frames, metadata), not a bare PIL list. Pass THWC
+            # ndarray + temporal metadata; do_sample_frames=False so vLLM
+            # does not resample the already-uniform OpenCV frames.
+            frame_indices = list(meta.sampled_indices or list(range(len(frames))))
+            if len(frames) != len(frame_indices):
+                # Odd-frame pad duplicates the last sample.
+                frame_indices = frame_indices + [frame_indices[-1]] * (
+                    len(frames) - len(frame_indices)
+                )
+            fps = float(meta.fps) if meta.fps > 0 else 2.0
+            video_metadata = {
+                "fps": fps,
+                "duration": float(meta.duration_sec)
+                if meta.duration_sec > 0
+                else (len(frames) / fps),
+                "total_num_frames": int(meta.n_frames_total) or len(frames),
+                "frames_indices": frame_indices,
+                "video_backend": "opencv",
+                "do_sample_frames": False,
+            }
+            # THWC uint8 — matches vLLM Qwen3VLDummyInputsBuilder layout.
+            video_arr = np.stack(frames, axis=0)
             messages = [
                 {
                     "role": "user",
@@ -325,7 +345,7 @@ class VLLMBackend(Backend):
             text = self._processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            mm_data: dict[str, Any] = {"video": pil_frames}
+            mm_data: dict[str, Any] = {"video": (video_arr, video_metadata)}
             video_kwargs: dict[str, Any] = {
                 # Already sampled with OpenCV — do not resample inside HF/vLLM.
                 "do_sample_frames": False,
@@ -335,7 +355,7 @@ class VLLMBackend(Backend):
                 video_kwargs["max_pixels"] = max_pixels
             # Pre-prune estimate: processor will set real grid; use frame*64 proxy.
             visual_pre = len(frames) * 64
-            decode_tag = "opencv_pil_vllm_processor"
+            decode_tag = "opencv_thwc_metadata"
         else:
             from qwen_vl_utils import process_vision_info
 

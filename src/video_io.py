@@ -17,6 +17,8 @@ class VideoMeta:
     n_frames_total: int
     width: int
     height: int
+    # Indices into the original video for the returned frames (uniform sample).
+    sampled_indices: list[int] | None = None
 
 
 def probe_video(path: str | Path) -> VideoMeta:
@@ -66,6 +68,7 @@ def load_frames(
     cap = cv2.VideoCapture(str(path))
     frames: list[np.ndarray] = []
 
+    sampled_indices: list[int] = []
     if meta.n_frames_total > 0:
         idxs = _sample_indices(meta.n_frames_total, num_frames)
         for idx in idxs:
@@ -74,6 +77,7 @@ def load_frames(
             if not ok:
                 continue
             frames.append(_maybe_resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), resize_max))
+            sampled_indices.append(idx)
     else:
         # Some containers report 0 frame count; sequential decode then subsample.
         raw: list[np.ndarray] = []
@@ -85,6 +89,7 @@ def load_frames(
         if raw:
             idxs = _sample_indices(len(raw), num_frames)
             frames = [raw[i] for i in idxs]
+            sampled_indices = list(idxs)
             meta = VideoMeta(
                 path=meta.path,
                 duration_sec=len(raw) / meta.fps if meta.fps > 0 else 0.0,
@@ -92,11 +97,22 @@ def load_frames(
                 n_frames_total=len(raw),
                 width=raw[0].shape[1],
                 height=raw[0].shape[0],
+                sampled_indices=sampled_indices,
             )
 
     cap.release()
     if not frames:
         raise RuntimeError(f"Failed to decode any frames from {path}")
+    if meta.sampled_indices is None:
+        meta = VideoMeta(
+            path=meta.path,
+            duration_sec=meta.duration_sec,
+            fps=meta.fps,
+            n_frames_total=meta.n_frames_total,
+            width=meta.width,
+            height=meta.height,
+            sampled_indices=sampled_indices,
+        )
     return frames, meta
 
 

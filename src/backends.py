@@ -11,7 +11,7 @@ import numpy as np
 
 from .prompts import build_mcq_prompt, extract_letter
 from .pruning import retained_token_estimate
-from .utils import get_logger
+from .utils import get_logger, project_path
 from .video_io import load_frames, probe_video
 
 log = get_logger("backend")
@@ -141,7 +141,14 @@ class VLLMBackend(Backend):
         self.model_name = model_name
         self.cfg = cfg
         self.pruning_rate = float(pruning_rate)
+        # Prefer VidCom2; fall back to EVS if this vLLM build lacks vidcom2.
         self.pruning_method = str(cfg.get("video_pruning_method", "vidcom2"))
+        hint = project_path("results", "metrics", "pruning_method_hint.txt")
+        if hint.exists():
+            hinted = hint.read_text(encoding="utf-8").strip()
+            if hinted in {"evs", "vidcom2"}:
+                self.pruning_method = hinted
+                log.info("Using pruning method from install hint: %s", hinted)
         self._llm = None
         self._processor = None
         self._SamplingParams = None

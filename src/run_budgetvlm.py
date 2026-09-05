@@ -68,6 +68,15 @@ def main() -> None:
         if okey in index:
             oracle_rows.append({**index[okey], "policy": "Oracle", "complexity": cx[vid]})
 
+    if not budget_rows:
+        log.warning(
+            "BudgetVLM selected 0 rows — complexity video_ids likely do not match "
+            "predictions (e.g. synthetic complexity vs Video-MME). "
+            "Re-run: python -m src.compute_complexity --backend vllm "
+            "--predictions %s",
+            pred_path,
+        )
+
     write_jsonl(project_path("results", "predictions", "budgetvlm.jsonl"), budget_rows)
     write_jsonl(project_path("results", "predictions", "oracle.jsonl"), oracle_rows)
 

@@ -5,7 +5,7 @@ import argparse
 
 from .complexity import score_video
 from .dataset_videomme import iter_unique_videos, load_videomme_annotations, make_synthetic_dataset
-from .utils import get_logger, load_config, project_path, write_jsonl
+from .utils import get_logger, load_config, project_path, read_jsonl, write_jsonl
 
 log = get_logger("complexity")
 
@@ -14,19 +14,37 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument(
+        "--backend",
+        default=None,
+        help="mock → synthetic videos; vllm → Video-MME (defaults to config serving.backend)",
+    )
+    ap.add_argument(
+        "--predictions",
+        default=None,
+        help="If set, only score video_ids present in this predictions jsonl (recommended)",
+    )
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--use-scene", action="store_true", help="Phase 8 combined metric")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     cfg = load_config(args.config)
     limit = args.limit if args.limit is not None else int(cfg["dataset"]["default_limit"])
+    backend_name = (args.backend or cfg["serving"]["backend"]).lower()
 
-    if args.synthetic or cfg["serving"]["backend"] == "mock":
+    video_ids = None
+    if args.predictions:
+        video_ids = sorted({str(r["video_id"]) for r in read_jsonl(project_path(args.predictions))})
+        log.info("Restricting complexity to %d videos from predictions", len(video_ids))
+
+    if args.synthetic or backend_name == "mock":
         examples = make_synthetic_dataset(n_videos=limit, seed=cfg["seed"])
     else:
         examples = load_videomme_annotations(
             root=project_path(*(cfg["dataset"]["root"].split("/"))),
-            limit=limit,
+            limit=None if video_ids is not None else limit,
+            video_ids=video_ids,
+            require_video=True,
         )
 
     rows = []
